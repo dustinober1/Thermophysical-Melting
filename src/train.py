@@ -45,6 +45,12 @@ def kfold_cv(
     tfidf_ngram_max: int = 5,
     tfidf_min_df: int = 2,
     svd_components: int = 256,
+    # RDKit/Morgan/MACCS feature flags
+    use_rdkit_desc: bool = False,
+    use_morgan: bool = False,
+    morgan_radius: int = 2,
+    morgan_nbits: int = 1024,
+    use_maccs: bool = False,
 ):
     X_df, Xte_df, features = attach_features(
         train,
@@ -56,6 +62,11 @@ def kfold_cv(
         tfidf_min_df=tfidf_min_df,
         svd_components=svd_components,
         random_state=seed,
+        use_rdkit_desc=use_rdkit_desc,
+        use_morgan=use_morgan,
+        morgan_radius=morgan_radius,
+        morgan_nbits=morgan_nbits,
+        use_maccs=use_maccs,
     )
     X = X_df.values
     y = train["Tm"].values
@@ -158,6 +169,12 @@ def main():
     parser.add_argument("--tfidf-ngram-max", type=int, default=5)
     parser.add_argument("--tfidf-min-df", type=int, default=2)
     parser.add_argument("--svd-components", type=int, default=256)
+    # RDKit/Mordred features
+    parser.add_argument("--rdkit-desc", action="store_true", help="Include Mordred/2D RDKit descriptors")
+    parser.add_argument("--morgan", action="store_true", help="Include Morgan fingerprints")
+    parser.add_argument("--morgan-radius", type=int, default=2)
+    parser.add_argument("--morgan-nbits", type=int, default=1024)
+    parser.add_argument("--maccs", action="store_true", help="Include MACCS keys")
     args = parser.parse_args()
 
     train, test = load_data()
@@ -175,9 +192,23 @@ def main():
         tfidf_min_df=args.tfidf_min_df,
         svd_components=args.svd_components,
         random_state=args.seed,
+        use_rdkit_desc=args.rdkit_desc,
+        use_morgan=args.morgan,
+        morgan_radius=args.morgan_radius,
+        morgan_nbits=args.morgan_nbits,
+        use_maccs=args.maccs,
     )
     assert len(features) > 0, "No features found"
-    print(f"Using {len(features)} features ({sum(c.startswith('Group ') for c in features)} Group + {sum(c.startswith('S_') for c in features)} SMILES-basic)")
+    n_group = sum(c.startswith('Group ') for c in features)
+    n_sbasic = sum(c.startswith('S_') for c in features)
+    n_tfidf = sum(c.startswith('TFIDF_SVD_') for c in features)
+    n_rd = sum(c.startswith('RD_') for c in features)
+    n_mg = sum(c.startswith('MG_') for c in features)
+    n_maccs = sum(c.startswith('MACCS_') for c in features)
+    print(
+        f"Using {len(features)} features ("
+        f"{n_group} Group, {n_sbasic} S-basic, {n_tfidf} TFIDF, {n_rd} RDKit, {n_mg} Morgan, {n_maccs} MACCS)"
+    )
     print(f"Train shape: {train.shape} | Test shape: {test.shape}")
 
     oof, preds, cv_mae = kfold_cv(
@@ -192,6 +223,11 @@ def main():
         tfidf_ngram_max=args.tfidf_ngram_max,
         tfidf_min_df=args.tfidf_min_df,
         svd_components=args.svd_components,
+        use_rdkit_desc=args.rdkit_desc,
+        use_morgan=args.morgan,
+        morgan_radius=args.morgan_radius,
+        morgan_nbits=args.morgan_nbits,
+        use_maccs=args.maccs,
     )
     save_submission(test, preds, f"{args.name}_{args.model}_cv{cv_mae:.3f}")
 

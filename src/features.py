@@ -6,6 +6,10 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
+from rdkit import Chem
+from rdkit import DataStructs
+from rdkit.Chem import Descriptors, rdMolDescriptors, MACCSkeys
+from mordred import Calculator, descriptors
 
 
 HALOGENS = ["F", "Cl", "Br", "I"]
@@ -98,6 +102,11 @@ def attach_features(
     tfidf_min_df: int = 2,
     svd_components: int = 256,
     random_state: int = 42,
+    use_rdkit_desc: bool = False,
+    use_morgan: bool = False,
+    morgan_radius: int = 2,
+    morgan_nbits: int = 1024,
+    use_maccs: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
     features: List[str] = []
 
@@ -139,5 +148,73 @@ def attach_features(
         train_feat = pd.concat([train_feat, tr_df], axis=1)
         test_feat = pd.concat([test_feat, te_df], axis=1)
         features.extend(svd_cols)
+
+    if use_rdkit_desc or use_morgan or use_maccs:
+        # Convert SMILES to mols
+        def to_mol(s: str):
+            try:
+                return Chem.MolFromSmiles(s)
+            except Exception:
+                return None
+
+        tr_smiles = train["SMILES"].astype(str).tolist()
+        te_smiles = test["SMILES"].astype(str).tolist()
+        tr_mols = [to_mol(s) for s in tr_smiles]
+        te_mols = [to_mol(s) for s in te_smiles]
+
+        if use_rdkit_desc:
+            # Mordred descriptors (2D only)
+            calc = Calculator(descriptors, ignore_3D=True)
+            tr_desc = calc.pandas(tr_mols)
+            te_desc = calc.pandas(te_mols)
+            # Clean
+            tr_desc = tr_desc.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            te_desc = te_desc.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            # Align columns
+            tr_desc, te_desc = tr_desc.align(te_desc, join="outer", axis=1, fill_value=0.0)
+            # Columns to strings
+            tr_desc.columns = tr_desc.columns.astype(str)
+            te_desc.columns = te_desc.columns.astype(str)
+            tr_desc = tr_desc.add_prefix("RD_")
+            te_desc = te_desc.add_prefix("RD_")
+            train_feat = pd.concat([train_feat, tr_desc], axis=1)
+            test_feat = pd.concat([test_feat, te_desc], axis=1)
+            features.extend(list(tr_desc.columns))
+
+        if use_morgan:
+            def morgan_fp(mol):
+                if mol is None:
+                    return np.zeros(morgan_nbits, dtype=np.int8)
+                bv = rdMolDescriptors.GetMorganFingerprintAsBitVect(mol, radius=morgan_radius, nBits=morgan_nbits)
+                arr = np.zeros((morgan_nbits,), dtype=np.int8)
+                DataStructs.ConvertToNumpyArray(bv, arr)
+                return arr
+
+            tr_fp = np.vstack([morgan_fp(m) for m in tr_mols])
+            te_fp = np.vstack([morgan_fp(m) for m in te_mols])
+            cols = [f"MG_{morgan_radius}_{morgan_nbits}_{i:04d}" for i in range(tr_fp.shape[1])]
+            tr_df = pd.DataFrame(tr_fp, index=train.index, columns=cols)
+            te_df = pd.DataFrame(te_fp, index=test.index, columns=cols)
+            train_feat = pd.concat([train_feat, tr_df], axis=1)
+            test_feat = pd.concat([test_feat, te_df], axis=1)
+            features.extend(cols)
+
+        if use_maccs:
+            def maccs_fp(mol):
+                if mol is None:
+                    return np.zeros(167, dtype=np.int8)
+                keys = MACCSkeys.GenMACCSKeys(mol)
+                arr = np.zeros((167,), dtype=np.int8)
+                DataStructs.ConvertToNumpyArray(keys, arr)
+                return arr
+
+            tr_fp = np.vstack([maccs_fp(m) for m in tr_mols])
+            te_fp = np.vstack([maccs_fp(m) for m in te_mols])
+            cols = [f"MACCS_{i:03d}" for i in range(tr_fp.shape[1])]
+            tr_df = pd.DataFrame(tr_fp, index=train.index, columns=cols)
+            te_df = pd.DataFrame(te_fp, index=test.index, columns=cols)
+            train_feat = pd.concat([train_feat, tr_df], axis=1)
+            test_feat = pd.concat([test_feat, te_df], axis=1)
+            features.extend(cols)
 
     return train_feat, test_feat, features
