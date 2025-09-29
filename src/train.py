@@ -33,8 +33,30 @@ def get_feature_columns(df: pd.DataFrame) -> List[str]:
     return group_cols
 
 
-def kfold_cv(train: pd.DataFrame, test: pd.DataFrame, model_type: str = "lightgbm", n_folds: int = N_FOLDS, seed: int = RANDOM_STATE, use_smiles_basic: bool = False):
-    X_df, Xte_df, features = attach_features(train, test, use_smiles_basic=use_smiles_basic)
+def kfold_cv(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    model_type: str = "lightgbm",
+    n_folds: int = N_FOLDS,
+    seed: int = RANDOM_STATE,
+    use_smiles_basic: bool = False,
+    use_smiles_tfidf: bool = False,
+    tfidf_ngram_min: int = 2,
+    tfidf_ngram_max: int = 5,
+    tfidf_min_df: int = 2,
+    svd_components: int = 256,
+):
+    X_df, Xte_df, features = attach_features(
+        train,
+        test,
+        use_smiles_basic=use_smiles_basic,
+        use_smiles_tfidf=use_smiles_tfidf,
+        tfidf_ngram_min=tfidf_ngram_min,
+        tfidf_ngram_max=tfidf_ngram_max,
+        tfidf_min_df=tfidf_min_df,
+        svd_components=svd_components,
+        random_state=seed,
+    )
     X = X_df.values
     y = train["Tm"].values
     X_test = Xte_df.values
@@ -131,6 +153,11 @@ def main():
     parser.add_argument("--seed", type=int, default=RANDOM_STATE)
     parser.add_argument("--name", type=str, default="baseline_group_features")
     parser.add_argument("--smiles-basic", action="store_true", help="Include simple SMILES text features")
+    parser.add_argument("--smiles-tfidf", action="store_true", help="Include SMILES char TF-IDF + SVD features")
+    parser.add_argument("--tfidf-ngram-min", type=int, default=2)
+    parser.add_argument("--tfidf-ngram-max", type=int, default=5)
+    parser.add_argument("--tfidf-min-df", type=int, default=2)
+    parser.add_argument("--svd-components", type=int, default=256)
     args = parser.parse_args()
 
     train, test = load_data()
@@ -138,12 +165,34 @@ def main():
     # Basic checks
     assert "Tm" in train.columns, "Target Tm missing in train.csv"
     # Build features
-    X_df, Xte_df, features = attach_features(train, test, use_smiles_basic=args.smiles_basic)
+    X_df, Xte_df, features = attach_features(
+        train,
+        test,
+        use_smiles_basic=args.smiles_basic,
+        use_smiles_tfidf=args.smiles_tfidf,
+        tfidf_ngram_min=args.tfidf_ngram_min,
+        tfidf_ngram_max=args.tfidf_ngram_max,
+        tfidf_min_df=args.tfidf_min_df,
+        svd_components=args.svd_components,
+        random_state=args.seed,
+    )
     assert len(features) > 0, "No features found"
     print(f"Using {len(features)} features ({sum(c.startswith('Group ') for c in features)} Group + {sum(c.startswith('S_') for c in features)} SMILES-basic)")
     print(f"Train shape: {train.shape} | Test shape: {test.shape}")
 
-    oof, preds, cv_mae = kfold_cv(train, test, model_type=args.model, n_folds=args.folds, seed=args.seed, use_smiles_basic=args.smiles_basic)
+    oof, preds, cv_mae = kfold_cv(
+        train,
+        test,
+        model_type=args.model,
+        n_folds=args.folds,
+        seed=args.seed,
+        use_smiles_basic=args.smiles_basic,
+        use_smiles_tfidf=args.smiles_tfidf,
+        tfidf_ngram_min=args.tfidf_ngram_min,
+        tfidf_ngram_max=args.tfidf_ngram_max,
+        tfidf_min_df=args.tfidf_min_df,
+        svd_components=args.svd_components,
+    )
     save_submission(test, preds, f"{args.name}_{args.model}_cv{cv_mae:.3f}")
 
 

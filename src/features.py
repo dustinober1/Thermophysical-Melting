@@ -4,6 +4,8 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import TruncatedSVD
 
 
 HALOGENS = ["F", "Cl", "Br", "I"]
@@ -90,6 +92,12 @@ def attach_features(
     train: pd.DataFrame,
     test: pd.DataFrame,
     use_smiles_basic: bool = False,
+    use_smiles_tfidf: bool = False,
+    tfidf_ngram_min: int = 2,
+    tfidf_ngram_max: int = 5,
+    tfidf_min_df: int = 2,
+    svd_components: int = 256,
+    random_state: int = 42,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
     features: List[str] = []
 
@@ -108,5 +116,28 @@ def attach_features(
         train_feat = pd.concat([train_feat, tr_s], axis=1)
         test_feat = pd.concat([test_feat, te_s], axis=1)
         features.extend(list(tr_s.columns))
+
+    if use_smiles_tfidf:
+        # Character-level TF-IDF on SMILES, then SVD to dense low-dim
+        vec = TfidfVectorizer(
+            analyzer="char",
+            ngram_range=(tfidf_ngram_min, tfidf_ngram_max),
+            min_df=tfidf_min_df,
+        )
+        tr_texts = train["SMILES"].astype(str).tolist()
+        te_texts = test["SMILES"].astype(str).tolist()
+        Xtr_sparse = vec.fit_transform(tr_texts)
+        Xte_sparse = vec.transform(te_texts)
+
+        svd = TruncatedSVD(n_components=min(svd_components, Xtr_sparse.shape[1]-1), random_state=random_state)
+        Xtr_svd = svd.fit_transform(Xtr_sparse)
+        Xte_svd = svd.transform(Xte_sparse)
+
+        svd_cols = [f"TFIDF_SVD_{i:03d}" for i in range(Xtr_svd.shape[1])]
+        tr_df = pd.DataFrame(Xtr_svd, index=train.index, columns=svd_cols)
+        te_df = pd.DataFrame(Xte_svd, index=test.index, columns=svd_cols)
+        train_feat = pd.concat([train_feat, tr_df], axis=1)
+        test_feat = pd.concat([test_feat, te_df], axis=1)
+        features.extend(svd_cols)
 
     return train_feat, test_feat, features
