@@ -80,3 +80,19 @@ This will:
 - `data/` — `train.csv` and `test.csv` live here.
 - `submissions/` — generated Kaggle submissions.
 - `oof/` — saved out-of-fold predictions (created by stacking pipeline).
+
+## Citation
+
+If you use this repository or submit to the competition, please cite:
+
+```bibtex
+@misc{melting-point,
+	author = {Frank Mtetwa and John Hedengren},
+	title = {Thermophysical Property: Melting Point},
+	year = {2025},
+	howpublished = {\url{https://kaggle.com/competitions/melting-point}},
+	note = {Kaggle}
+}
+```
+
+The same entry is available in `references.bib`.
