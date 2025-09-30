@@ -126,6 +126,7 @@ def main():
     # Feature flags (same as train.py)
     parser.add_argument("--smiles-basic", action="store_true")
     parser.add_argument("--smiles-tfidf", action="store_true")
+    parser.add_argument("--chemical-structure", action="store_true", help="Include chemical structure features (H-bonds, symmetry, etc.)")
     parser.add_argument("--tfidf-ngram-min", type=int, default=2)
     parser.add_argument("--tfidf-ngram-max", type=int, default=5)
     parser.add_argument("--tfidf-min-df", type=int, default=2)
@@ -143,6 +144,7 @@ def main():
         test,
         use_smiles_basic=args.smiles_basic,
         use_smiles_tfidf=args.smiles_tfidf,
+        use_chemical_structure=args.chemical_structure,
         tfidf_ngram_min=args.tfidf_ngram_min,
         tfidf_ngram_max=args.tfidf_ngram_max,
         tfidf_min_df=args.tfidf_min_df,

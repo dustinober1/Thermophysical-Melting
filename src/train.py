@@ -41,6 +41,7 @@ def kfold_cv(
     seed: int = RANDOM_STATE,
     use_smiles_basic: bool = False,
     use_smiles_tfidf: bool = False,
+    use_chemical_structure: bool = False,
     tfidf_ngram_min: int = 2,
     tfidf_ngram_max: int = 5,
     tfidf_min_df: int = 2,
@@ -57,6 +58,7 @@ def kfold_cv(
         test,
         use_smiles_basic=use_smiles_basic,
         use_smiles_tfidf=use_smiles_tfidf,
+        use_chemical_structure=use_chemical_structure,
         tfidf_ngram_min=tfidf_ngram_min,
         tfidf_ngram_max=tfidf_ngram_max,
         tfidf_min_df=tfidf_min_df,
@@ -165,6 +167,7 @@ def main():
     parser.add_argument("--name", type=str, default="baseline_group_features")
     parser.add_argument("--smiles-basic", action="store_true", help="Include simple SMILES text features")
     parser.add_argument("--smiles-tfidf", action="store_true", help="Include SMILES char TF-IDF + SVD features")
+    parser.add_argument("--chemical-structure", action="store_true", help="Include chemical structure features (H-bonds, symmetry, etc.)")
     parser.add_argument("--tfidf-ngram-min", type=int, default=2)
     parser.add_argument("--tfidf-ngram-max", type=int, default=5)
     parser.add_argument("--tfidf-min-df", type=int, default=2)
@@ -187,6 +190,7 @@ def main():
         test,
         use_smiles_basic=args.smiles_basic,
         use_smiles_tfidf=args.smiles_tfidf,
+        use_chemical_structure=args.chemical_structure,
         tfidf_ngram_min=args.tfidf_ngram_min,
         tfidf_ngram_max=args.tfidf_ngram_max,
         tfidf_min_df=args.tfidf_min_df,
@@ -201,13 +205,14 @@ def main():
     assert len(features) > 0, "No features found"
     n_group = sum(c.startswith('Group ') for c in features)
     n_sbasic = sum(c.startswith('S_') for c in features)
+    n_chem = sum(c.startswith('CHEM_') for c in features)
     n_tfidf = sum(c.startswith('TFIDF_SVD_') for c in features)
     n_rd = sum(c.startswith('RD_') for c in features)
     n_mg = sum(c.startswith('MG_') for c in features)
     n_maccs = sum(c.startswith('MACCS_') for c in features)
     print(
         f"Using {len(features)} features ("
-        f"{n_group} Group, {n_sbasic} S-basic, {n_tfidf} TFIDF, {n_rd} RDKit, {n_mg} Morgan, {n_maccs} MACCS)"
+        f"{n_group} Group, {n_sbasic} S-basic, {n_chem} Chem, {n_tfidf} TFIDF, {n_rd} RDKit, {n_mg} Morgan, {n_maccs} MACCS)"
     )
     print(f"Train shape: {train.shape} | Test shape: {test.shape}")
 
@@ -219,6 +224,7 @@ def main():
         seed=args.seed,
         use_smiles_basic=args.smiles_basic,
         use_smiles_tfidf=args.smiles_tfidf,
+        use_chemical_structure=args.chemical_structure,
         tfidf_ngram_min=args.tfidf_ngram_min,
         tfidf_ngram_max=args.tfidf_ngram_max,
         tfidf_min_df=args.tfidf_min_df,

@@ -8,7 +8,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
 from rdkit import Chem
 from rdkit import DataStructs
-from rdkit.Chem import Descriptors, rdMolDescriptors, MACCSkeys
+from rdkit.Chem import Descriptors, rdMolDescriptors, MACCSkeys, Lipinski, Crippen, rdMolChemicalFeatures
+from rdkit.Chem.Fragments import fr_halogen
 from mordred import Calculator, descriptors
 
 
@@ -88,6 +89,123 @@ def build_basic_smiles_features(df: pd.DataFrame, smiles_col: str = "SMILES") ->
     return feat.add_prefix("S_")
 
 
+def _chemical_structure_features(mol) -> Dict[str, float]:
+    """
+    Extract chemical structure features that correlate with melting point:
+    - Hydrogen bonding descriptors
+    - Symmetry measures  
+    - Rotatable bonds
+    - Molecular flexibility
+    """
+    if mol is None:
+        return {
+            "hbd_count": 0.0,
+            "hba_count": 0.0, 
+            "rotatable_bonds": 0.0,
+            "heavy_atoms": 0.0,
+            "rings": 0.0,
+            "aromatic_rings": 0.0,
+            "fused_rings": 0.0,
+            "molecular_weight": 0.0,
+            "logp": 0.0,
+            "tpsa": 0.0,
+            "balaban_j": 0.0,
+            "kappa1": 0.0,
+            "kappa2": 0.0,
+            "kappa3": 0.0,
+            "chi0v": 0.0,
+            "chi1v": 0.0,
+            "fraction_csp3": 0.0,
+            "halogen_count": 0.0,
+            "formal_charge": 0.0,
+        }
+    
+    try:
+        features = {}
+        
+        # Hydrogen bonding - critical for melting point
+        features["hbd_count"] = Descriptors.NumHDonors(mol)
+        features["hba_count"] = Descriptors.NumHAcceptors(mol)
+        
+        # Molecular flexibility
+        features["rotatable_bonds"] = Descriptors.NumRotatableBonds(mol)
+        features["heavy_atoms"] = mol.GetNumHeavyAtoms()
+        
+        # Ring systems - affect crystal packing
+        features["rings"] = Descriptors.RingCount(mol)
+        features["aromatic_rings"] = Descriptors.NumAromaticRings(mol)
+        features["fused_rings"] = Descriptors.NumAliphaticRings(mol)
+        
+        # Basic molecular properties
+        features["molecular_weight"] = Descriptors.MolWt(mol)
+        features["logp"] = Crippen.MolLogP(mol)
+        features["tpsa"] = Descriptors.TPSA(mol)
+        
+        # Topological indices (symmetry measures)
+        features["balaban_j"] = Descriptors.BalabanJ(mol)
+        features["kappa1"] = Descriptors.Kappa1(mol)
+        features["kappa2"] = Descriptors.Kappa2(mol)
+        features["kappa3"] = Descriptors.Kappa3(mol)
+        
+        # Connectivity indices
+        features["chi0v"] = Descriptors.Chi0v(mol)
+        features["chi1v"] = Descriptors.Chi1v(mol)
+        
+        # Hybridization (sp3 carbons are more flexible)
+        features["fraction_csp3"] = Descriptors.FractionCsp3(mol)
+        
+        # Halogen count (affects melting point significantly)
+        features["halogen_count"] = fr_halogen(mol)
+        
+        # Formal charge
+        features["formal_charge"] = Chem.rdmolops.GetFormalCharge(mol)
+        
+        return features
+        
+    except Exception:
+        # Return zeros if calculation fails
+        return {
+            "hbd_count": 0.0,
+            "hba_count": 0.0, 
+            "rotatable_bonds": 0.0,
+            "heavy_atoms": 0.0,
+            "rings": 0.0,
+            "aromatic_rings": 0.0,
+            "fused_rings": 0.0,
+            "molecular_weight": 0.0,
+            "logp": 0.0,
+            "tpsa": 0.0,
+            "balaban_j": 0.0,
+            "kappa1": 0.0,
+            "kappa2": 0.0,
+            "kappa3": 0.0,
+            "chi0v": 0.0,
+            "chi1v": 0.0,
+            "fraction_csp3": 0.0,
+            "halogen_count": 0.0,
+            "formal_charge": 0.0,
+        }
+
+
+def build_chemical_structure_features(df: pd.DataFrame, smiles_col: str = "SMILES") -> pd.DataFrame:
+    """Build chemical structure features from SMILES"""
+    def to_mol(s: str):
+        try:
+            return Chem.MolFromSmiles(s)
+        except Exception:
+            return None
+    
+    rows: List[Dict[str, float]] = []
+    for s in df[smiles_col].astype(str).tolist():
+        mol = to_mol(s)
+        rows.append(_chemical_structure_features(mol))
+    
+    feat = pd.DataFrame(rows)
+    # Replace inf/nan that may arise from calculation errors
+    feat = feat.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return feat.add_prefix("CHEM_")
+
+
 def get_group_columns(df: pd.DataFrame) -> List[str]:
     return [c for c in df.columns if c.startswith("Group ")]
 
@@ -97,6 +215,7 @@ def attach_features(
     test: pd.DataFrame,
     use_smiles_basic: bool = False,
     use_smiles_tfidf: bool = False,
+    use_chemical_structure: bool = False,
     tfidf_ngram_min: int = 2,
     tfidf_ngram_max: int = 5,
     tfidf_min_df: int = 2,
@@ -125,6 +244,15 @@ def attach_features(
         train_feat = pd.concat([train_feat, tr_s], axis=1)
         test_feat = pd.concat([test_feat, te_s], axis=1)
         features.extend(list(tr_s.columns))
+
+    if use_chemical_structure:
+        tr_chem = build_chemical_structure_features(train)
+        te_chem = build_chemical_structure_features(test)
+        # Align columns just in case
+        tr_chem, te_chem = tr_chem.align(te_chem, join="outer", axis=1, fill_value=0.0)
+        train_feat = pd.concat([train_feat, tr_chem], axis=1)
+        test_feat = pd.concat([test_feat, te_chem], axis=1)
+        features.extend(list(tr_chem.columns))
 
     if use_smiles_tfidf:
         # Character-level TF-IDF on SMILES, then SVD to dense low-dim

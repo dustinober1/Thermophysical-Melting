@@ -15,3 +15,5 @@ logs/
 
 # Feature caches (if enabled later)
 data/features_*
+
+*.csv
