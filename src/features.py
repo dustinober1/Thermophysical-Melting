@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.feature_selection import VarianceThreshold
 from rdkit import Chem
 from rdkit import DataStructs
 from rdkit.Chem import Descriptors, rdMolDescriptors, MACCSkeys, Lipinski, Crippen, rdMolChemicalFeatures
@@ -206,6 +208,99 @@ def build_chemical_structure_features(df: pd.DataFrame, smiles_col: str = "SMILE
     return feat.add_prefix("CHEM_")
 
 
+def build_advanced_features(df_chem: pd.DataFrame, use_polynomial: bool = False, use_interactions: bool = False) -> pd.DataFrame:
+    """
+    Build advanced features from chemical structure features:
+    - Polynomial features for key descriptors
+    - Meaningful chemical interactions
+    - Derived ratios and indices
+    """
+    advanced_features = pd.DataFrame(index=df_chem.index)
+    
+    # Key chemical ratios that affect melting point
+    eps = 1e-8  # Small constant to avoid division by zero
+    
+    # H-bonding capacity ratio
+    hbd = df_chem.get('CHEM_hbd_count', 0) 
+    hba = df_chem.get('CHEM_hba_count', 0)
+    advanced_features['hbond_ratio'] = (hbd + eps) / (hba + eps)
+    advanced_features['total_hbond'] = hbd + hba
+    
+    # Flexibility vs rigidity
+    rot_bonds = df_chem.get('CHEM_rotatable_bonds', 0)
+    rings = df_chem.get('CHEM_rings', 0)
+    aromatic_rings = df_chem.get('CHEM_aromatic_rings', 0)
+    advanced_features['flexibility_ratio'] = (rot_bonds + eps) / (rings + eps)
+    advanced_features['rigidity_index'] = aromatic_rings + rings - rot_bonds
+    
+    # Size-normalized descriptors
+    mw = df_chem.get('CHEM_molecular_weight', 1)
+    heavy_atoms = df_chem.get('CHEM_heavy_atoms', 1)
+    advanced_features['mw_per_atom'] = mw / (heavy_atoms + eps)
+    advanced_features['tpsa_per_atom'] = df_chem.get('CHEM_tpsa', 0) / (heavy_atoms + eps)
+    
+    # Symmetry and compactness measures
+    chi0v = df_chem.get('CHEM_chi0v', 0)
+    chi1v = df_chem.get('CHEM_chi1v', 0)
+    advanced_features['connectivity_ratio'] = (chi1v + eps) / (chi0v + eps)
+    
+    # Heteroatom and halogen effects
+    halogen_count = df_chem.get('CHEM_halogen_count', 0)
+    advanced_features['halogen_density'] = halogen_count / (heavy_atoms + eps)
+    
+    if use_polynomial:
+        # Polynomial features for key melting point predictors
+        key_features = ['CHEM_hbd_count', 'CHEM_hba_count', 'CHEM_molecular_weight', 
+                       'CHEM_logp', 'CHEM_rings', 'CHEM_aromatic_rings']
+        available_features = [f for f in key_features if f in df_chem.columns]
+        
+        if available_features:
+            poly_data = df_chem[available_features].fillna(0)
+            poly = PolynomialFeatures(degree=2, interaction_only=False, include_bias=False)
+            poly_features = poly.fit_transform(poly_data)
+            poly_names = [f"POLY_{name}" for name in poly.get_feature_names_out(available_features)]
+            poly_df = pd.DataFrame(poly_features, index=df_chem.index, columns=poly_names)
+            
+            # Remove original features to avoid duplication
+            original_cols = [col for col in poly_df.columns if not any(op in col for op in ['^2', ' '])]
+            poly_df = poly_df.drop(columns=original_cols)
+            
+            advanced_features = pd.concat([advanced_features, poly_df], axis=1)
+    
+    if use_interactions:
+        # Meaningful chemical interactions
+        interactions = pd.DataFrame(index=df_chem.index)
+        
+        # H-bonding strength interaction
+        interactions['hbond_strength'] = hbd * hba
+        
+        # Lipophilicity-size interaction
+        logp = df_chem.get('CHEM_logp', 0)
+        interactions['lipophilic_size'] = logp * mw
+        
+        # Ring system complexity
+        interactions['ring_complexity'] = rings * aromatic_rings
+        
+        # Electrostatic-size interaction
+        formal_charge = df_chem.get('CHEM_formal_charge', 0)
+        interactions['charge_size'] = abs(formal_charge) * mw
+        
+        advanced_features = pd.concat([advanced_features, interactions], axis=1)
+    
+    # Remove low-variance features
+    variance_threshold = VarianceThreshold(threshold=0.001)
+    try:
+        advanced_features_filtered = variance_threshold.fit_transform(advanced_features)
+        feature_names = advanced_features.columns[variance_threshold.get_support()]
+        advanced_features = pd.DataFrame(advanced_features_filtered, 
+                                       index=advanced_features.index, 
+                                       columns=feature_names)
+    except:
+        pass  # Keep original features if filtering fails
+    
+    return advanced_features.add_prefix("ADV_")
+
+
 def get_group_columns(df: pd.DataFrame) -> List[str]:
     return [c for c in df.columns if c.startswith("Group ")]
 
@@ -216,6 +311,9 @@ def attach_features(
     use_smiles_basic: bool = False,
     use_smiles_tfidf: bool = False,
     use_chemical_structure: bool = False,
+    use_advanced_features: bool = False,
+    use_polynomial: bool = False,
+    use_interactions: bool = False,
     tfidf_ngram_min: int = 2,
     tfidf_ngram_max: int = 5,
     tfidf_min_df: int = 2,
@@ -253,6 +351,16 @@ def attach_features(
         train_feat = pd.concat([train_feat, tr_chem], axis=1)
         test_feat = pd.concat([test_feat, te_chem], axis=1)
         features.extend(list(tr_chem.columns))
+        
+        # Advanced features built from chemical structure features
+        if use_advanced_features:
+            tr_adv = build_advanced_features(tr_chem, use_polynomial=use_polynomial, use_interactions=use_interactions)
+            te_adv = build_advanced_features(te_chem, use_polynomial=use_polynomial, use_interactions=use_interactions)
+            # Align columns
+            tr_adv, te_adv = tr_adv.align(te_adv, join="outer", axis=1, fill_value=0.0)
+            train_feat = pd.concat([train_feat, tr_adv], axis=1)
+            test_feat = pd.concat([test_feat, te_adv], axis=1)
+            features.extend(list(tr_adv.columns))
 
     if use_smiles_tfidf:
         # Character-level TF-IDF on SMILES, then SVD to dense low-dim

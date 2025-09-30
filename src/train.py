@@ -10,6 +10,7 @@ from sklearn.metrics import mean_absolute_error
 from sklearn.preprocessing import StandardScaler
 import lightgbm as lgb
 from catboost import CatBoostRegressor, Pool
+import xgboost as xgb
 from features import attach_features
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -42,6 +43,9 @@ def kfold_cv(
     use_smiles_basic: bool = False,
     use_smiles_tfidf: bool = False,
     use_chemical_structure: bool = False,
+    use_advanced_features: bool = False,
+    use_polynomial: bool = False,
+    use_interactions: bool = False,
     tfidf_ngram_min: int = 2,
     tfidf_ngram_max: int = 5,
     tfidf_min_df: int = 2,
@@ -59,6 +63,9 @@ def kfold_cv(
         use_smiles_basic=use_smiles_basic,
         use_smiles_tfidf=use_smiles_tfidf,
         use_chemical_structure=use_chemical_structure,
+        use_advanced_features=use_advanced_features,
+        use_polynomial=use_polynomial,
+        use_interactions=use_interactions,
         tfidf_ngram_min=tfidf_ngram_min,
         tfidf_ngram_max=tfidf_ngram_max,
         tfidf_min_df=tfidf_min_df,
@@ -81,7 +88,7 @@ def kfold_cv(
 
     # Standardize for LightGBM when using leaves-wise splits (optional, CatBoost doesn't need it)
     scaler = None
-    if model_type == "lightgbm":
+    if model_type in ["lightgbm", "xgboost"]:
         scaler = StandardScaler(with_mean=False)
         X = scaler.fit_transform(X)
         X_test = scaler.transform(X_test)
@@ -113,13 +120,43 @@ def kfold_cv(
                 num_boost_round=5000,
                 valid_sets=[lgb_train, lgb_valid],
                 valid_names=["train", "valid"],
-                callbacks=[
-                    lgb.early_stopping(stopping_rounds=200, verbose=False),
-                    lgb.log_evaluation(period=100),
-                ],
+                callbacks=[lgb.early_stopping(100), lgb.log_evaluation(100)],
             )
+
+        elif model_type == "xgboost":
+            dtrain = xgb.DMatrix(X_tr, label=y_tr)
+            dval = xgb.DMatrix(X_val, label=y_val)
+            params = {
+                "objective": "reg:absoluteerror",
+                "eval_metric": "mae",
+                "learning_rate": 0.05,
+                "max_depth": 6,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "min_child_weight": 10,
+                "reg_alpha": 1.0,
+                "reg_lambda": 1.0,
+                "seed": seed,
+                "verbosity": 0,
+                "n_jobs": os.cpu_count() or 4,
+            }
+            model = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=5000,
+                evals=[(dtrain, "train"), (dval, "valid")],
+                early_stopping_rounds=100,
+                verbose_eval=100,
+            )
+        if model_type == "lightgbm":
             oof[val_idx] = model.predict(X_val, num_iteration=model.best_iteration)
             preds += model.predict(X_test, num_iteration=model.best_iteration) / n_folds
+
+        elif model_type == "xgboost":
+            dval = xgb.DMatrix(X_val)
+            dtest = xgb.DMatrix(X_test)
+            oof[val_idx] = model.predict(dval, iteration_range=(0, model.best_iteration + 1))
+            preds += model.predict(dtest, iteration_range=(0, model.best_iteration + 1)) / n_folds
 
         elif model_type == "catboost":
             train_pool = Pool(X_tr, y_tr)
@@ -161,13 +198,16 @@ def save_submission(test: pd.DataFrame, preds: np.ndarray, name: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=["lightgbm", "catboost"], default="lightgbm")
+    parser.add_argument("--model", choices=["lightgbm", "catboost", "xgboost"], default="lightgbm")
     parser.add_argument("--folds", type=int, default=N_FOLDS)
     parser.add_argument("--seed", type=int, default=RANDOM_STATE)
     parser.add_argument("--name", type=str, default="baseline_group_features")
     parser.add_argument("--smiles-basic", action="store_true", help="Include simple SMILES text features")
     parser.add_argument("--smiles-tfidf", action="store_true", help="Include SMILES char TF-IDF + SVD features")
     parser.add_argument("--chemical-structure", action="store_true", help="Include chemical structure features (H-bonds, symmetry, etc.)")
+    parser.add_argument("--advanced-features", action="store_true", help="Include advanced chemical features (ratios, interactions)")
+    parser.add_argument("--polynomial", action="store_true", help="Include polynomial features for key descriptors")
+    parser.add_argument("--interactions", action="store_true", help="Include meaningful chemical interactions")
     parser.add_argument("--tfidf-ngram-min", type=int, default=2)
     parser.add_argument("--tfidf-ngram-max", type=int, default=5)
     parser.add_argument("--tfidf-min-df", type=int, default=2)
@@ -191,6 +231,9 @@ def main():
         use_smiles_basic=args.smiles_basic,
         use_smiles_tfidf=args.smiles_tfidf,
         use_chemical_structure=args.chemical_structure,
+        use_advanced_features=args.advanced_features,
+        use_polynomial=args.polynomial,
+        use_interactions=args.interactions,
         tfidf_ngram_min=args.tfidf_ngram_min,
         tfidf_ngram_max=args.tfidf_ngram_max,
         tfidf_min_df=args.tfidf_min_df,
@@ -206,13 +249,14 @@ def main():
     n_group = sum(c.startswith('Group ') for c in features)
     n_sbasic = sum(c.startswith('S_') for c in features)
     n_chem = sum(c.startswith('CHEM_') for c in features)
+    n_adv = sum(c.startswith('ADV_') for c in features)
     n_tfidf = sum(c.startswith('TFIDF_SVD_') for c in features)
     n_rd = sum(c.startswith('RD_') for c in features)
     n_mg = sum(c.startswith('MG_') for c in features)
     n_maccs = sum(c.startswith('MACCS_') for c in features)
     print(
         f"Using {len(features)} features ("
-        f"{n_group} Group, {n_sbasic} S-basic, {n_chem} Chem, {n_tfidf} TFIDF, {n_rd} RDKit, {n_mg} Morgan, {n_maccs} MACCS)"
+        f"{n_group} Group, {n_sbasic} S-basic, {n_chem} Chem, {n_adv} Adv, {n_tfidf} TFIDF, {n_rd} RDKit, {n_mg} Morgan, {n_maccs} MACCS)"
     )
     print(f"Train shape: {train.shape} | Test shape: {test.shape}")
 
@@ -225,6 +269,9 @@ def main():
         use_smiles_basic=args.smiles_basic,
         use_smiles_tfidf=args.smiles_tfidf,
         use_chemical_structure=args.chemical_structure,
+        use_advanced_features=args.advanced_features,
+        use_polynomial=args.polynomial,
+        use_interactions=args.interactions,
         tfidf_ngram_min=args.tfidf_ngram_min,
         tfidf_ngram_max=args.tfidf_ngram_max,
         tfidf_min_df=args.tfidf_min_df,

@@ -7,10 +7,12 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_absolute_error
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, ElasticNet
+from sklearn.kernel_ridge import KernelRidge
 from sklearn.preprocessing import StandardScaler
 import lightgbm as lgb
 from catboost import CatBoostRegressor, Pool
+import xgboost as xgb
 
 from features import attach_features
 
@@ -52,6 +54,34 @@ def fit_lgbm(X, y, X_val, y_val, seed: int):
             lgb.early_stopping(stopping_rounds=200, verbose=False),
             lgb.log_evaluation(period=100),
         ],
+    )
+    return model
+
+
+def fit_xgb(X, y, X_val, y_val, seed: int):
+    dtrain = xgb.DMatrix(X, label=y)
+    dval = xgb.DMatrix(X_val, label=y_val)
+    params = {
+        "objective": "reg:absoluteerror",
+        "eval_metric": "mae",
+        "learning_rate": 0.05,
+        "max_depth": 6,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "min_child_weight": 10,
+        "reg_alpha": 1.0,
+        "reg_lambda": 1.0,
+        "seed": seed,
+        "verbosity": 0,
+        "n_jobs": os.cpu_count() or 4,
+    }
+    model = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=5000,
+        evals=[(dtrain, "train"), (dval, "valid")],
+        early_stopping_rounds=100,
+        verbose_eval=False,  # Suppress output for stacking
     )
     return model
 
@@ -101,6 +131,13 @@ def make_oof_predictions(
             oof_preds["lightgbm"][val_idx] = m.predict(X_val, num_iteration=m.best_iteration)
             test_preds["lightgbm"] += m.predict(X_test_scaled, num_iteration=m.best_iteration) / folds
 
+        if "xgboost" in models:
+            m = fit_xgb(X_tr, y_tr, X_val, y_val, seed + fold)
+            dval = xgb.DMatrix(X_val)
+            dtest = xgb.DMatrix(X_test_scaled)
+            oof_preds["xgboost"][val_idx] = m.predict(dval, iteration_range=(0, m.best_iteration + 1))
+            test_preds["xgboost"] += m.predict(dtest, iteration_range=(0, m.best_iteration + 1)) / folds
+
         if "catboost" in models:
             m = fit_catboost(X_tr, y_tr, X_val, y_val, seed + fold)
             oof_preds["catboost"][val_idx] = m.predict(X_val)
@@ -127,6 +164,9 @@ def main():
     parser.add_argument("--smiles-basic", action="store_true")
     parser.add_argument("--smiles-tfidf", action="store_true")
     parser.add_argument("--chemical-structure", action="store_true", help="Include chemical structure features (H-bonds, symmetry, etc.)")
+    parser.add_argument("--advanced-features", action="store_true", help="Include advanced chemical features (ratios, interactions)")
+    parser.add_argument("--polynomial", action="store_true", help="Include polynomial features for key descriptors")
+    parser.add_argument("--interactions", action="store_true", help="Include meaningful chemical interactions")
     parser.add_argument("--tfidf-ngram-min", type=int, default=2)
     parser.add_argument("--tfidf-ngram-max", type=int, default=5)
     parser.add_argument("--tfidf-min-df", type=int, default=2)
@@ -145,6 +185,9 @@ def main():
         use_smiles_basic=args.smiles_basic,
         use_smiles_tfidf=args.smiles_tfidf,
         use_chemical_structure=args.chemical_structure,
+        use_advanced_features=args.advanced_features,
+        use_polynomial=args.polynomial,
+        use_interactions=args.interactions,
         tfidf_ngram_min=args.tfidf_ngram_min,
         tfidf_ngram_max=args.tfidf_ngram_max,
         tfidf_min_df=args.tfidf_min_df,
@@ -179,24 +222,42 @@ def main():
     X_meta = meta_scaler.fit_transform(X_meta)
     X_meta_test = meta_scaler.transform(X_meta_test)
 
-    ridge = Ridge(alpha=1.0, random_state=args.seed)
-    # CV for meta
+    # Multiple meta-learners for ensemble diversity
+    meta_models = {
+        "ridge": Ridge(alpha=1.0, random_state=args.seed),
+        "elastic": ElasticNet(alpha=0.5, l1_ratio=0.5, random_state=args.seed, max_iter=2000),
+        "kernel_ridge": KernelRidge(alpha=1.0, kernel="rbf", gamma=0.1),
+    }
+    
+    # CV for meta-learners
     kf = KFold(n_splits=args.folds, shuffle=True, random_state=args.seed)
-    meta_oof = np.zeros_like(y, dtype=float)
-    meta_test = np.zeros(X_test.shape[0], dtype=float)
-    for fold, (trn_idx, val_idx) in enumerate(kf.split(X_meta, y), 1):
-        ridge.fit(X_meta[trn_idx], y[trn_idx])
-        meta_oof[val_idx] = ridge.predict(X_meta[val_idx])
-        meta_test += ridge.predict(X_meta_test) / args.folds
-        print(f"Meta fold {fold}: {mean_absolute_error(y[val_idx], meta_oof[val_idx]):.4f}")
-
-    meta_cv = mean_absolute_error(y, meta_oof)
-    print(f"Meta CV MAE: {meta_cv:.4f} | Base: {base_cv}")
+    meta_results = {}
+    
+    for meta_name, meta_model in meta_models.items():
+        meta_oof = np.zeros_like(y, dtype=float)
+        meta_test = np.zeros(X_test.shape[0], dtype=float)
+        
+        for fold, (trn_idx, val_idx) in enumerate(kf.split(X_meta, y), 1):
+            meta_model.fit(X_meta[trn_idx], y[trn_idx])
+            meta_oof[val_idx] = meta_model.predict(X_meta[val_idx])
+            meta_test += meta_model.predict(X_meta_test) / args.folds
+        
+        meta_cv = mean_absolute_error(y, meta_oof)
+        meta_results[meta_name] = {"cv": meta_cv, "oof": meta_oof, "test": meta_test}
+        print(f"{meta_name.capitalize()} Meta CV MAE: {meta_cv:.4f}")
+    
+    # Select best meta-learner
+    best_meta = min(meta_results.keys(), key=lambda x: meta_results[x]["cv"])
+    best_cv = meta_results[best_meta]["cv"]
+    best_test = meta_results[best_meta]["test"]
+    
+    print(f"\nBest meta-learner: {best_meta} (CV MAE: {best_cv:.4f})")
+    print(f"Base model CVs: {base_cv}")
 
     # Save submission
     SUB_DIR.mkdir(parents=True, exist_ok=True)
-    sub = pd.DataFrame({"id": test["id"], "Tm": meta_test})
-    out_path = SUB_DIR / f"submission_{args.name}_stack_meta{meta_cv:.3f}.csv"
+    sub = pd.DataFrame({"id": test["id"], "Tm": best_test})
+    out_path = SUB_DIR / f"submission_{args.name}_{best_meta}_meta{best_cv:.3f}.csv"
     sub.to_csv(out_path, index=False)
     print(f"Saved submission to {out_path}")
 
