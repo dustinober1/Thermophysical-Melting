@@ -68,9 +68,40 @@ This will:
 
 ## Current status
 
-- Best single model CV: ~31.996 MAE (LightGBM + Group + SMILES-basic + TF-IDF+SVD 128 comps).
-- Stacking gain: ~31.774 MAE (Ridge on LGBM + CatBoost OOFs with the same features).
-- See `executive_summary.md` for a high-level summary and prioritized next actions.
+- **Best stacking CV: ~31.5 MAE** (LightGBM + CatBoost + XGBoost with Ridge meta-learner)
+- Best single model CV: ~32.0 MAE (LightGBM with TF-IDF 256 components)
+- Original baseline: ~32.0 MAE (LightGBM + Group + SMILES-basic + TF-IDF+SVD 128 comps)
+- **Target: MAE < 20** (stretch goal: < 10)
+
+## 🚀 Quick Path to MAE < 20
+
+Based on analysis of winning Kaggle notebooks (see `STRATEGY_FOR_MAE_UNDER_20.md`):
+
+### Critical Success Factors:
+1. **External Data** - Bradley datasets (~170k samples) - **BIGGEST IMPACT**
+2. **Yeo-Johnson transformation** - Normalizes target distribution
+3. **Comprehensive fingerprints** - 6900+ molecular features
+4. **Feature selection** - Reduces overfitting
+5. **10-fold CV** - Better generalization
+
+### Quick Start:
+```bash
+# Step 1: Get external data (see EXTERNAL_DATA_GUIDE.md)
+# Download Bradley datasets to data/ folder
+
+# Step 2: Run with external data
+python src/train_with_external_data.py \
+    --model lightgbm \
+    --folds 10 \
+    --use-external \
+    --name external_comprehensive
+
+# Step 3: Try multiple models and ensemble
+python src/train_with_external_data.py --model xgboost --folds 10 --use-external
+python src/train_with_external_data.py --model catboost --folds 10 --use-external
+```
+
+See `STRATEGY_FOR_MAE_UNDER_20.md` for detailed strategy and `EXTERNAL_DATA_GUIDE.md` for obtaining datasets.
 
 ## Repository layout
 
@@ -94,5 +125,3 @@ If you use this repository or submit to the competition, please cite:
 	note = {Kaggle}
 }
 ```
-
-The same entry is available in `references.bib`.
